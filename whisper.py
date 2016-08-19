@@ -676,6 +676,62 @@ def file_update_many(fh, points):
     fh.flush()
     os.fsync(fh.fileno())
 
+def update_many_ex(path, points, _from):
+  """update_many_ex(path,points, _from)
+
+path is a string
+points is a list of (timestamp,value) points
+"""
+  if not points: return
+  points = [(int(t), float(v)) for (t, v) in points]
+  points.sort(key=lambda p: p[0], reverse=True)  # Order points by timestamp, newest first
+  with open(path, 'r+b') as fh:
+    if CAN_FADVISE and FADVISE_RANDOM:
+      posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
+    return file_update_many_ex(fh, points, _from)
+
+
+def file_update_many_ex(fh, points, _from=None):
+  if LOCK:
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+  header = __readHeader(fh)
+  #now = int( time.time() )
+  if _from is None:
+    now = int( time.time() )
+  else:
+    now = _from
+  archives = iter(header['archives'])
+  currentArchive = next(archives)
+  currentPoints = []
+
+  for point in points:
+    age = now - point[0]
+
+    while currentArchive['retention'] < age:  # We can't fit any more points in this archive
+      if currentPoints:  # Commit all the points we've found that it can fit
+        currentPoints.reverse()  # Put points in chronological order
+        __archive_update_many(fh, header, currentArchive, currentPoints)
+        currentPoints = []
+      try:
+        currentArchive = next(archives)
+      except StopIteration:
+        currentArchive = None
+        break
+
+    if not currentArchive:
+      break  # Drop remaining points that don't fit in the database
+
+    currentPoints.append(point)
+
+  if currentArchive and currentPoints:  # Don't forget to commit after we've checked all the archives
+    currentPoints.reverse()
+    __archive_update_many(fh, header, currentArchive, currentPoints)
+
+  if AUTOFLUSH:
+    fh.flush()
+    os.fsync(fh.fileno())
+
 
 def __archive_update_many(fh, header, archive, points):
   step = archive['secondsPerPoint']
